@@ -1,6 +1,7 @@
 'use strict';
 const store = require('./_lib/store');
 const { send, body, only, auth, shuffle, view } = require('./_lib/util');
+const { getSettings } = require('./_lib/settings');
 
 module.exports = async (req, res) => {
   if (!only(req, res, 'POST')) return;
@@ -14,7 +15,7 @@ module.exports = async (req, res) => {
     if (!pool.length) return send(res, 200, { ok: false, error: 'This quiz has no questions yet.' });
     const n = Math.min(quiz.per_student, pool.length);
 
-    const meta = { id: quiz.code, title: quiz.title, subject: quiz.subject, program: quiz.programme, programme: quiz.programme, mode: quiz.mode, duration_minutes: quiz.mode === 'test' ? (quiz.duration_minutes || 30) : 0, question_count: n };
+    const meta = { id: quiz.code, title: quiz.title, subject: quiz.subject, program: quiz.programme, programme: quiz.programme, mode: quiz.mode, duration_minutes: quiz.mode === 'test' ? (quiz.duration_minutes || 30) : 0, question_count: n, tab_limit: (await getSettings()).tab_limit };
 
     if (quiz.mode === 'test') {
       // Test: no questions are sent here. They arrive at /api/start, after the student presses Begin.
