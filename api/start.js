@@ -1,6 +1,8 @@
 'use strict';
 const store = require('./_lib/store');
 const { send, body, only, auth, shuffle, view, KEYS } = require('./_lib/util');
+const { blockedMessage } = require('./_lib/schedule');
+const { pickQuestions } = require('./_lib/select');
 
 function present(attempt, byId) {
   return attempt.question_ids.map((id) => byId[id]).filter(Boolean).map((q) => view(q, attempt.option_orders[q.id], false));
@@ -21,9 +23,10 @@ module.exports = async (req, res) => {
     if (attempt && attempt.status === 'submitted') return send(res, 200, { ok: false, error: 'You have already taken this test.' });
 
     if (!attempt) {
-      if (!quiz.open) return send(res, 200, { ok: false, error: 'This test has been closed.' });
+      const blocked = blockedMessage(quiz);
+      if (blocked) return send(res, 200, { ok: false, error: blocked });
       if (!pool.length) return send(res, 200, { ok: false, error: 'This test has no questions yet.' });
-      const chosen = shuffle(pool).slice(0, Math.min(quiz.per_student, pool.length));
+      const chosen = pickQuestions(pool, Math.min(quiz.per_student, pool.length), quiz.mix);
       const orders = {}; chosen.forEach((q) => { orders[q.id] = quiz.shuffle_options ? shuffle(KEYS) : KEYS.slice(); });
       const minutes = quiz.duration_minutes || 30;
       try {
