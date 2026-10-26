@@ -45,6 +45,8 @@ exports.attemptsByFreeName = (name) => run(c().from('attempts').select(LIGHT).eq
 
 exports.listStudents = () => pageAll(() => c().from('students').select('*').order('created_at', { ascending: false }));
 exports.getStudent = (bia) => run(c().from('students').select('*').eq('bia_id', bia).maybeSingle());
-exports.insertStudent = async (name) => { const { data, error } = await c().from('students').insert({ name }).select().single(); if (error) throw error; return data; };
-exports.insertStudents = async (names) => { const out = []; for (const n of names) out.push(await exports.insertStudent(n)); return out; };   // one by one so IDs follow the order given
+exports.insertStudent = async (name, phone) => { const { data, error } = await c().from('students').insert({ name, phone: phone || null }).select().single(); if (error) throw error; return data; };
+exports.insertStudents = async (list) => { const out = []; for (const s of list) out.push(await exports.insertStudent(s.name, s.phone)); return out; };   // one by one so IDs follow the order given
+exports.setStudentPhone = (bia, phone) => run(c().from('students').update({ phone: phone || null }).eq('bia_id', bia).select().maybeSingle());
+exports.setQuizSchedule = (id, opens, closes) => run(c().from('quizzes').update({ opens_at: opens, closes_at: closes, open: true }).eq('id', id).select().maybeSingle());
 exports.setStudentActive = (bia, active) => run(c().from('students').update({ active }).eq('bia_id', bia).select().maybeSingle());
