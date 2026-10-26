@@ -2,6 +2,8 @@
 const store = require('./_lib/store');
 const { send, body, only, auth, shuffle, view } = require('./_lib/util');
 const { getSettings } = require('./_lib/settings');
+const { blockedMessage } = require('./_lib/schedule');
+const { pickQuestions } = require('./_lib/select');
 
 module.exports = async (req, res) => {
   if (!only(req, res, 'POST')) return;
@@ -10,6 +12,13 @@ module.exports = async (req, res) => {
     const quiz = await store.getQuizByCode(String(body(req).quiz || '').slice(0, 40));
     if (!quiz || !quiz.open) return send(res, 200, { ok: false, error: 'This quiz could not be found, or it has been closed.' });
     if (quiz.mode === 'test' && p.tier !== 'paid') return send(res, 200, { ok: false, error: 'Test mode is for paying tutorial students. Log in with your BIA ID.' });
+
+    // Schedule: a test already in progress may be finished; nobody can start a new one outside the window.
+    const blocked = blockedMessage(quiz);
+    if (blocked) {
+      const running = quiz.mode === 'test' && p.bia_id ? await store.findTestAttempt(quiz.id, p.bia_id) : null;
+      if (!(running && running.status === 'in_progress')) return send(res, 200, { ok: false, error: blocked });
+    }
 
     const pool = await store.getQuestions(quiz.id);
     if (!pool.length) return send(res, 200, { ok: false, error: 'This quiz has no questions yet.' });
@@ -25,7 +34,7 @@ module.exports = async (req, res) => {
     }
 
     // Practice: a fresh random set every time, with answers and explanations.
-    meta.questions = shuffle(pool).slice(0, n).map((q) => view(q, null, true));
+    meta.questions = pickQuestions(pool, n, quiz.mix).map((q) => view(q, null, true));
     send(res, 200, { ok: true, quiz: meta });
   } catch (e) {
     console.error('quiz', e);
