@@ -6,10 +6,21 @@ const data = require('./_lib/admin-data');
 const settings = require('./_lib/settings');
 const milo = require('./_lib/milo');
 const stats = require('./_lib/stats');
+const { stateOf, parseSchedule } = require('./_lib/schedule');
 const { send, body, sign, auth, limit, KEYS } = require('./_lib/util');
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const clean = (n) => String(n || '').replace(/[\u0000-\u001f<>]/g, '').replace(/\s+/g, ' ').trim();
+/* Nigerian numbers: 0803 123 4567, 803 123 4567 and +234 803 123 4567 all become 2348031234567 (the form WhatsApp links need). */
+function normPhone(v) {
+  const d = String(v == null ? '' : v).replace(/\D/g, '');
+  if (!d) return '';
+  if (d.length === 13 && d.startsWith('234')) return d;
+  if (d.length === 11 && d.startsWith('0')) return '234' + d.slice(1);
+  if (d.length === 10) return '234' + d;
+  return null;
+}
+const ms = (x) => (x ? new Date(x).getTime() : null);
 const fail = (res, msg) => send(res, 200, { ok: false, error: msg });
 
 function sameCode(a, b) {
@@ -50,7 +61,7 @@ on('GET', /^\/stats$/, async (req, res, m, q) => {
 on('GET', /^\/quizzes$/, async (req, res) => {
   const [quizzes, attempts] = await Promise.all([data.listQuizzes(), data.allAttempts()]);
   const per = {}; attempts.filter((a) => a.status === 'submitted').forEach((a) => { (per[a.quiz_id] = per[a.quiz_id] || []).push(stats.pct(a)); });
-  send(res, 200, { ok: true, quizzes: quizzes.map((z) => ({ id: z.id, code: z.code, title: z.title, subject: z.subject, programme: z.programme, mode: z.mode, questions: Math.min(z.per_student, z.pool), pool: z.pool, attempts: (per[z.id] || []).length, avg: stats.avgOf(per[z.id] || []), open: z.open })) });
+  send(res, 200, { ok: true, quizzes: quizzes.map((z) => ({ id: z.id, code: z.code, title: z.title, subject: z.subject, programme: z.programme, mode: z.mode, questions: Math.min(z.per_student, z.pool), pool: z.pool, attempts: (per[z.id] || []).length, avg: stats.avgOf(per[z.id] || []), open: z.open, opens_at: ms(z.opens_at), closes_at: ms(z.closes_at), state: stateOf(z) })) });
 });
 
 on('POST', /^\/quizzes\/([^/]+)\/status$/, async (req, res, m) => {
@@ -66,6 +77,25 @@ on('GET', /^\/quizzes\/([^/]+)\/stats$/, async (req, res, m) => {
   send(res, 200, stats.quizStats({ quiz, questions, attempts, passMark: st.pass_mark }));
 });
 
+on('POST', /^\/quizzes\/([^/]+)\/schedule$/, async (req, res, m) => {
+  if (!UUID.test(m[1])) return fail(res, 'Quiz not found.');
+  const b = body(req), sch = parseSchedule(b.opens_at, b.closes_at);
+  if (sch.error) return fail(res, sch.error);
+  const row = await data.setQuizSchedule(m[1], sch.opens, sch.closes);          // saving a schedule also reopens the quiz
+  send(res, 200, row ? { ok: true, opens_at: ms(row.opens_at), closes_at: ms(row.closes_at), state: stateOf(row) } : { ok: false, error: 'Quiz not found.' });
+});
+
+/* Registered (paying) students who have not submitted this quiz. Free students have no record, so they cannot be listed. */
+on('GET', /^\/quizzes\/([^/]+)\/missed$/, async (req, res, m) => {
+  if (!UUID.test(m[1])) return fail(res, 'Quiz not found.');
+  const quiz = await data.getQuiz(m[1]); if (!quiz) return fail(res, 'Quiz not found.');
+  const [students, attempts] = await Promise.all([data.listStudents(), data.quizAttemptsFull(quiz.id)]);
+  const done = new Set(attempts.filter((a) => a.status === 'submitted' && a.bia_id).map((a) => a.bia_id)), started = new Set(attempts.filter((a) => a.status !== 'submitted' && a.bia_id).map((a) => a.bia_id));
+  const active = students.filter((s) => s.active);
+  const missed = active.filter((s) => !done.has(s.bia_id)).sort((a, b) => (a.bia_id < b.bia_id ? -1 : 1)).map((s) => ({ bia_id: s.bia_id, name: s.name, phone: s.phone || '', started: started.has(s.bia_id) }));
+  send(res, 200, { ok: true, quiz: { id: quiz.id, code: quiz.code, title: quiz.title, mode: quiz.mode, opens_at: ms(quiz.opens_at), closes_at: ms(quiz.closes_at), state: stateOf(quiz) }, total: active.length, taken: active.length - missed.length, missed });
+});
+
 on('GET', /^\/results$/, async (req, res) => {
   const rows = await data.submittedAttempts(1000);
   send(res, 200, { ok: true, results: rows.map((a) => ({ name: a.student_name, bia_id: a.bia_id || '', tier: a.tier, quiz: a.quizzes ? a.quizzes.title : '', mode: a.mode, score: a.score, total: a.total, seconds: a.seconds_taken || 0, tab_switches: a.tab_switches || 0, reason: a.reason || 'submitted', at: new Date(a.submitted_at).getTime() })) });
@@ -77,7 +107,7 @@ on('GET', /^\/candidate$/, async (req, res, m, q) => {
   if (bia) {
     const s = await data.getStudent(String(bia).replace(/\D/g, '').padStart(4, '0')); if (!s) return fail(res, 'Candidate not found.');
     const rows = await data.attemptsByBia(s.bia_id);
-    return send(res, 200, { ok: true, pass_mark: st.pass_mark, candidate: { name: s.name, bia_id: s.bia_id, tier: 'paid', active: s.active, added: new Date(s.created_at).getTime() }, attempts: rows.map(attemptRow) });
+    return send(res, 200, { ok: true, pass_mark: st.pass_mark, candidate: { name: s.name, bia_id: s.bia_id, tier: 'paid', active: s.active, phone: s.phone || '', added: new Date(s.created_at).getTime() }, attempts: rows.map(attemptRow) });
   }
   if (!name) return fail(res, 'Candidate not found.');
   const rows = await data.attemptsByFreeName(name);
@@ -90,20 +120,29 @@ const attemptRow = (a) => ({ quiz: a.quizzes ? a.quizzes.title : '', mode: a.mod
 on('GET', /^\/students$/, async (req, res) => {
   const [students, attempts] = await Promise.all([data.listStudents(), data.allAttempts()]);
   const n = {}; attempts.filter((a) => a.status === 'submitted' && a.bia_id).forEach((a) => { n[a.bia_id] = (n[a.bia_id] || 0) + 1; });
-  send(res, 200, { ok: true, students: students.map((s) => ({ bia_id: s.bia_id, name: s.name, added: new Date(s.created_at).getTime(), attempts: n[s.bia_id] || 0, active: s.active })) });
+  send(res, 200, { ok: true, students: students.map((s) => ({ bia_id: s.bia_id, name: s.name, added: new Date(s.created_at).getTime(), attempts: n[s.bia_id] || 0, active: s.active, phone: s.phone || '' })) });
 });
 on('POST', /^\/students$/, async (req, res) => {
-  const name = clean(body(req).name);
+  const b = body(req), name = clean(b.name), phone = normPhone(b.phone);
   if (name.length < 5 || name.length > 80 || name.split(' ').length < 2) return fail(res, 'Enter the full name (first and last name).');
-  const s = await data.insertStudent(name);
-  send(res, 200, { ok: true, student: { bia_id: s.bia_id, name: s.name } });
+  if (phone === null) return fail(res, 'That phone number does not look right. Use a Nigerian number like 0803 123 4567, or leave it empty.');
+  const st = await data.insertStudent(name, phone);
+  send(res, 200, { ok: true, student: { bia_id: st.bia_id, name: st.name, phone: st.phone || '' } });
 });
 on('POST', /^\/students\/bulk$/, async (req, res) => {
-  const names = (Array.isArray(body(req).names) ? body(req).names : []).map(clean).filter(Boolean);
-  if (!names.length || names.length > 100) return fail(res, 'Send between 1 and 100 names.');
-  if (names.some((n) => n.length < 5 || n.length > 80 || n.split(' ').length < 2)) return fail(res, 'Every name needs a first and last name.');
-  const rows = await data.insertStudents(names);
-  send(res, 200, { ok: true, students: rows.map((s) => ({ bia_id: s.bia_id, name: s.name })) });
+  const b = body(req);
+  const raw = Array.isArray(b.students) ? b.students : (Array.isArray(b.names) ? b.names.map((n) => ({ name: n })) : []);
+  const list = raw.map((x) => ({ name: clean(x && x.name), phone: normPhone(x && x.phone) }));
+  if (!list.length || list.length > 100) return fail(res, 'Send between 1 and 100 names.');
+  const badName = list.find((x) => x.name.length < 5 || x.name.length > 80 || x.name.split(' ').length < 2); if (badName) return fail(res, 'Every name needs a first and last name. Check: ' + (badName.name || '(empty)') + '.');
+  const badPhone = list.find((x) => x.phone === null); if (badPhone) return fail(res, 'The phone number for ' + badPhone.name + ' does not look right.');
+  const rows = await data.insertStudents(list);
+  send(res, 200, { ok: true, students: rows.map((st) => ({ bia_id: st.bia_id, name: st.name, phone: st.phone || '' })) });
+});
+on('POST', /^\/students\/(\d{1,6})\/phone$/, async (req, res, m) => {
+  const phone = normPhone(body(req).phone); if (phone === null) return fail(res, 'That phone number does not look right.');
+  const row = await data.setStudentPhone(m[1].padStart(4, '0'), phone);
+  send(res, 200, row ? { ok: true, phone: row.phone || '' } : { ok: false, error: 'Student not found.' });
 });
 on('POST', /^\/students\/(\d{1,6})\/active$/, async (req, res, m) => {
   const row = await data.setStudentActive(m[1].padStart(4, '0'), !!body(req).active);
@@ -120,7 +159,9 @@ on('POST', /^\/generate$/, async (req, res) => {
   const b = body(req), bad = checkCfg(b.cfg); if (bad) return fail(res, bad);
   const size = Math.max(1, Math.min(10, parseInt(b.size, 10) || 1)), start = Math.max(0, parseInt(b.start_index, 10) || 0);
   const avoid = (Array.isArray(b.avoid) ? b.avoid : []).slice(-80).map((s) => String(s).slice(0, 120));
-  const questions = await milo.generate({ cfg: b.cfg, size, startIndex: start, avoid });
+  let counts = null; const w = b.want;
+  if (w && typeof w === 'object') { const c = { calculation: parseInt(w.calculation, 10) || 0, theory: parseInt(w.theory, 10) || 0, application: parseInt(w.application, 10) || 0 }; if (c.calculation >= 0 && c.theory >= 0 && c.application >= 0 && c.calculation + c.theory + c.application === size) counts = c; }
+  const questions = await milo.generate({ cfg: b.cfg, size, startIndex: start, avoid, counts });
   send(res, 200, { ok: true, questions });
 });
 
@@ -148,10 +189,11 @@ on('POST', /^\/publish$/, async (req, res) => {
     if (!String(q.text || '').trim() || opts.length !== 4 || opts.some((o) => !o) || KEYS.indexOf(q.answer) < 0) return fail(res, 'Question ' + (i + 1) + ' is not complete. Every question needs text, 4 options and a correct answer.');
     rows.push({ position: i + 1, text: String(q.text).trim(), options: opts.map((t, j) => ({ key: KEYS[j], text: t })), answer: q.answer, explanation: String(q.explanation || '').trim(), qtype: ['calculation', 'theory', 'application'].indexOf(q.type) > -1 ? q.type : 'calculation' });
   }
+  const sch = parseSchedule(cfg.opensAt, cfg.closesAt); if (sch.error) return fail(res, sch.error);
   const per = Math.max(1, Math.min(parseInt(cfg.perStudent, 10) || rows.length, rows.length));
   const minutes = cfg.mode === 'test' ? Math.max(1, Math.min(300, parseInt(cfg.duration, 10) || 30)) : 0;
   let code = '', tries = 0; do { code = makeCode(); tries++; } while (await data.codeExists(code) && tries < 8);
-  const quiz = await data.insertQuiz({ code, title: clean(cfg.title), subject: clean(cfg.subject), programme: cfg.programme, mode: cfg.mode, duration_minutes: minutes, per_student: per, shuffle_options: cfg.shuffle !== false, open: true });
+  const quiz = await data.insertQuiz({ code, title: clean(cfg.title), subject: clean(cfg.subject), programme: cfg.programme, mode: cfg.mode, duration_minutes: minutes, per_student: per, shuffle_options: cfg.shuffle !== false, open: true, opens_at: sch.opens, closes_at: sch.closes, mix: { calculation: +cfg.mix.calc || 0, theory: +cfg.mix.theory || 0, application: +cfg.mix.app || 0 } });
   try { await data.insertQuestions(rows.map((r) => Object.assign({ quiz_id: quiz.id }, r))); }
   catch (e) { await data.deleteQuiz(quiz.id).catch(() => {}); throw e; }          // never leave a quiz with missing questions
   send(res, 200, { ok: true, code: quiz.code });
