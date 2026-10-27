@@ -1,5 +1,5 @@
 'use strict';
-/* Milo: BIA's question assistant. This is the ONLY file that talks to the Claude API.
+/* Milo: BIA's question assistant. This is the ONLY file that talks to the Claude API. 
    The key (ANTHROPIC_API_KEY) lives in Vercel settings and never reaches the browser. */
 const { shuffle } = require('./util');
 
