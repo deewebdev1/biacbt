@@ -1,6 +1,6 @@
 'use strict';
 const store = require('./_lib/store');
-const { send, body, only, auth, shuffle, view, KEYS } = require('./_lib/util');
+const { send, body, only, auth, shuffle, view, KEYS, studentKey } = require('./_lib/util');
 const { blockedMessage } = require('./_lib/schedule');
 const { pickQuestions } = require('./_lib/select');
 
@@ -12,14 +12,16 @@ module.exports = async (req, res) => {
   if (!only(req, res, 'POST')) return;
   const p = auth(req, res); if (!p) return;
   try {
-    if (p.tier !== 'paid' || !p.bia_id) return send(res, 200, { ok: false, error: 'Test mode is for paying tutorial students. Log in with your BIA ID.' });
     const quiz = await store.getQuizByCode(String(body(req).quiz || '').slice(0, 40));
     if (!quiz || quiz.mode !== 'test') return send(res, 200, { ok: false, error: 'This test could not be found.' });
+    if (p.tier !== 'paid' && String(quiz.programme || '').toUpperCase() !== 'JAMB') return send(res, 200, { ok: false, error: 'This test is for tutorial students. Log in with your BIA ID.' });
+    const key = p.bia_id ? null : studentKey(p.name);
+    const findAttempt = () => (p.bia_id ? store.findTestAttempt(quiz.id, p.bia_id) : store.findTestAttemptByKey(quiz.id, key));
 
     const pool = await store.getQuestions(quiz.id);
     const byId = {}; pool.forEach((q) => { byId[q.id] = q; });
 
-    let attempt = await store.findTestAttempt(quiz.id, p.bia_id);
+    let attempt = await findAttempt();
     if (attempt && attempt.status === 'submitted') return send(res, 200, { ok: false, error: 'You have already taken this test.' });
 
     if (!attempt) {
@@ -31,12 +33,12 @@ module.exports = async (req, res) => {
       const minutes = quiz.duration_minutes || 30;
       try {
         attempt = await store.createAttempt({
-          quiz_id: quiz.id, tier: 'paid', student_name: p.name, bia_id: p.bia_id, mode: 'test', status: 'in_progress',
+          quiz_id: quiz.id, tier: p.tier, student_name: p.name, bia_id: p.bia_id || null, student_key: key, mode: 'test', status: 'in_progress',
           ends_at: new Date(Date.now() + minutes * 60000).toISOString(), question_ids: chosen.map((q) => q.id), option_orders: orders
         });
       } catch (e) {
         if (e && e.code === '23505') {                       // two taps at once: use the attempt that won
-          attempt = await store.findTestAttempt(quiz.id, p.bia_id);
+          attempt = await findAttempt();
           if (!attempt) throw e;
           if (attempt.status === 'submitted') return send(res, 200, { ok: false, error: 'You have already taken this test.' });
         } else throw e;
