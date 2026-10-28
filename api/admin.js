@@ -157,10 +157,12 @@ on('POST', /^\/settings$/, async (req, res) => { const b = body(req); send(res, 
 on('POST', /^\/generate$/, async (req, res) => {
   if (!limit(req, 'milo', 40, 60000)) return fail(res, 'Slow down a little. Try again in a minute.');
   const b = body(req), bad = checkCfg(b.cfg); if (bad) return fail(res, bad);
-  const size = Math.max(1, Math.min(10, parseInt(b.size, 10) || 1)), start = Math.max(0, parseInt(b.start_index, 10) || 0);
+  const size = Math.max(1, Math.min(6, parseInt(b.size, 10) || 1)), start = Math.max(0, parseInt(b.start_index, 10) || 0);
   const avoid = (Array.isArray(b.avoid) ? b.avoid : []).slice(-80).map((s) => String(s).slice(0, 120));
   let counts = null; const w = b.want;
-  if (w && typeof w === 'object') { const c = { calculation: parseInt(w.calculation, 10) || 0, theory: parseInt(w.theory, 10) || 0, application: parseInt(w.application, 10) || 0 }; if (c.calculation >= 0 && c.theory >= 0 && c.application >= 0 && c.calculation + c.theory + c.application === size) counts = c; }
+  if (w && typeof w === 'object') { const c = { calculation: parseInt(w.calculation, 10) || 0, theory: parseInt(w.theory, 10) || 0, application: parseInt(w.application, 10) || 0 }; const tot = c.calculation + c.theory + c.application;
+    if (tot === size) counts = c;
+    else if (tot > size) { const ks = ['calculation', 'theory', 'application'], o = {}, rem = []; let used = 0; ks.forEach((k) => { const raw = size * c[k] / tot; o[k] = Math.floor(raw); used += o[k]; rem.push({ k, f: raw - o[k] }); }); rem.sort((x, y) => y.f - x.f); for (let i = 0; used < size; i++, used++) o[rem[i % 3].k]++; counts = o; } }   // the page asked for more than the server allows in one go: shrink the counts to fit
   const questions = await milo.generate({ cfg: b.cfg, size, startIndex: start, avoid, counts });
   send(res, 200, { ok: true, questions });
 });
