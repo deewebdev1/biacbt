@@ -14,7 +14,6 @@ module.exports = async (req, res) => {
   try {
     const quiz = await store.getQuizByCode(String(body(req).quiz || '').slice(0, 40));
     if (!quiz || quiz.mode !== 'test') return send(res, 200, { ok: false, error: 'This test could not be found.' });
-    if (p.tier !== 'paid' && String(quiz.programme || '').toUpperCase() !== 'JAMB') return send(res, 200, { ok: false, error: 'This test is for tutorial students. Log in with your BIA ID.' });
     const key = p.bia_id ? null : studentKey(p.name);
     const findAttempt = () => (p.bia_id ? store.findTestAttempt(quiz.id, p.bia_id) : store.findTestAttemptByKey(quiz.id, key));
 
