@@ -1,5 +1,5 @@
 'use strict';
-/* Milo: BIA's question assistant. This is the ONLY file that talks to the Claude API. 
+/* Milo: BIA's question assistant. This is the ONLY file that talks to the Claude API.
    The key (ANTHROPIC_API_KEY) lives in Vercel settings and never reaches the browser. */
 const { shuffle } = require('./util');
 
@@ -11,56 +11,62 @@ class MiloError extends Error {}
 /* Milo can run on Gemini (set GEMINI_API_KEY) or Claude (set ANTHROPIC_API_KEY). If both are set, Gemini is used. */
 const provider = () => (process.env.GEMINI_API_KEY ? 'gemini' : 'claude');
 const claudeModel = () => process.env.MILO_MODEL || 'claude-sonnet-5-5';
-/* "-latest" always points at Google's current Flash model, so a model being retired does not break Milo */
-const geminiModels = () => (process.env.MILO_MODEL ? [process.env.MILO_MODEL] : ['gemini-flash-latest', 'gemini-2.5-flash']);
+/* Tried in this order. If one is overloaded or gone, Milo moves to the next on its own. */
+const geminiModels = () => (process.env.MILO_MODEL ? [process.env.MILO_MODEL] : ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-flash-latest']);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const DEADLINE_MS = 54000;                      // Vercel stops a function at 60 seconds, so everything must finish before that
 
-async function timedFetch(url, init, what) {
-  const ctrl = new AbortController(); const timer = setTimeout(() => ctrl.abort(), 52000);
+async function timedFetch(url, init, ms) {
+  const ctrl = new AbortController(); const timer = setTimeout(() => ctrl.abort(), Math.max(1000, ms || 52000));
   try { return await fetch(url, Object.assign({}, init, { signal: ctrl.signal })); }
   catch (e) {
-    if (e && e.name === 'AbortError') throw new MiloError('Milo took too long. Try again with fewer questions at a time.');
+    if (e && e.name === 'AbortError') throw new MiloError('Milo took too long. Try again, or ask for fewer questions.');
     throw new MiloError('Could not reach Milo. Check the internet connection and try again.');
   } finally { clearTimeout(timer); }
 }
 
-async function callGemini({ system, user, maxTokens }) {
-  const key = process.env.GEMINI_API_KEY;
-  const models = geminiModels();
+async function callGemini({ system, user, maxTokens, deadline }) {
+  const key = process.env.GEMINI_API_KEY, models = geminiModels();
+  let last = 0;
   for (let i = 0; i < models.length; i++) {
-    const r = await timedFetch('https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(models[i]) + ':generateContent', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-goog-api-key': key },
-      body: JSON.stringify({
-        systemInstruction: { parts: [{ text: system }] },
-        contents: [{ role: 'user', parts: [{ text: user }] }],
-        generationConfig: { maxOutputTokens: maxTokens + 6000, responseMimeType: 'application/json' }   // extra room: Gemini's thinking counts against this limit
-      })
-    });
-    if (r.ok) {
-      const data = await r.json(), cand = data.candidates && data.candidates[0];
-      if (!cand) throw new MiloError('Gemini did not answer that request' + (data.promptFeedback && data.promptFeedback.blockReason ? ' (blocked: ' + data.promptFeedback.blockReason + ')' : '') + '. Try rewording it.');
-      if (cand.finishReason === 'MAX_TOKENS') throw new MiloError('Milo ran out of room for that. Try asking for fewer questions at a time.');
-      return ((cand.content && cand.content.parts) || []).filter((p) => !p.thought).map((p) => p.text || '').join('');
+    const model = models[i];
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const left = (deadline || Date.now() + DEADLINE_MS) - Date.now();
+      if (left < 4000) throw new MiloError('Milo took too long. Try again, or ask for fewer questions.');
+      // a small thinking budget keeps answers fast; the budget setting only exists on the 2.5 models
+      const gen = Object.assign({ maxOutputTokens: maxTokens + 2500, responseMimeType: 'application/json' }, /2\.5/.test(model) ? { thinkingConfig: { thinkingBudget: 1024 } } : {});
+      const r = await timedFetch('https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(model) + ':generateContent', {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-goog-api-key': key },
+        body: JSON.stringify({ systemInstruction: { parts: [{ text: system }] }, contents: [{ role: 'user', parts: [{ text: user }] }], generationConfig: gen })
+      }, Math.min(52000, left));
+      if (r.ok) {
+        const data = await r.json(), cand = data.candidates && data.candidates[0];
+        if (!cand) throw new MiloError('Gemini did not answer that request' + (data.promptFeedback && data.promptFeedback.blockReason ? ' (blocked: ' + data.promptFeedback.blockReason + ')' : '') + '. Try rewording it.');
+        if (cand.finishReason === 'MAX_TOKENS') throw new MiloError('Milo ran out of room for that. Try asking for fewer questions at a time.');
+        return ((cand.content && cand.content.parts) || []).filter((p) => !p.thought).map((p) => p.text || '').join('');
+      }
+      let detail = ''; try { detail = (await r.json()).error.message || ''; } catch (e) {}
+      console.error('gemini api', r.status, model, detail);
+      last = r.status;
+      if (r.status === 400 && /api key/i.test(detail)) throw new MiloError('Milo could not sign in. The GEMINI_API_KEY in Vercel looks wrong.');
+      if (r.status === 401 || r.status === 403) throw new MiloError('Milo could not sign in. The GEMINI_API_KEY in Vercel was refused. Check it in Google AI Studio.');
+      if (r.status === 500 || r.status === 502 || r.status === 503 || r.status === 504) { if (attempt === 0) { await sleep(1200); continue; } break; }   // overloaded: one quick retry, then the next model
+      break;                                                                                                                                     // 404 (model gone), 429 (that model's limit): next model
     }
-    let detail = ''; try { detail = (await r.json()).error.message || ''; } catch (e) {}
-    console.error('gemini api', r.status, models[i], detail);
-    if (r.status === 404 && i < models.length - 1) continue;                       // that model name is gone: try the next one
-    if (r.status === 400 && /api key/i.test(detail)) throw new MiloError('Milo could not sign in. The GEMINI_API_KEY in Vercel looks wrong.');
-    if (r.status === 401 || r.status === 403) throw new MiloError('Milo could not sign in. The GEMINI_API_KEY in Vercel was refused. Check it in Google AI Studio.');
-    if (r.status === 429) throw new MiloError('Milo is busy, or the free daily limit is used up. Wait a minute and try again.');
-    if (r.status === 404) throw new MiloError('Milo could not find the Gemini model. Set MILO_MODEL in Vercel to a current model name from Google AI Studio.');
-    throw new MiloError('Milo had a problem (code ' + r.status + '). Try again in a moment.');
   }
+  if (last === 429) throw new MiloError('Milo is busy, or the free daily limit is used up. Wait a few minutes and try again.');
+  if (last === 404) throw new MiloError('Milo could not find a Gemini model. Set MILO_MODEL in Vercel to a current model name from Google AI Studio.');
+  if (last === 503 || last === 500 || last === 502 || last === 504) throw new MiloError('Google\'s Gemini servers are overloaded right now. Wait a minute and press Try again.');
+  throw new MiloError('Milo had a problem (code ' + last + '). Try again in a moment.');
 }
 
-
-async function callClaude({ system, user, maxTokens }) {
+async function callClaude({ system, user, maxTokens, deadline }) {
   const key = process.env.ANTHROPIC_API_KEY;
   const r = await timedFetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' },
     body: JSON.stringify({ model: claudeModel(), max_tokens: maxTokens, system, messages: [{ role: 'user', content: user }] })
-  });
+  }, Math.min(52000, (deadline || Date.now() + DEADLINE_MS) - Date.now()));
   if (!r.ok) {
     let detail = ''; try { detail = (await r.json()).error.message || ''; } catch (e) {}
     console.error('claude api', r.status, detail);
@@ -132,7 +138,7 @@ const WRITER = [
   '- Wrong options must be plausible: use common student mistakes, wrong signs, wrong formulas. Never use "all of the above" or "none of the above". Keep option lengths similar.',
   '- Match the difficulty and the topics requested. Follow the Nigerian JUPEB and JAMB syllabus style. Do not copy past exam questions word for word. Never repeat a question or test the same idea twice in the same answer.',
   '- The quiz page shows plain text only. Do NOT use LaTeX, markdown or special formatting. Write maths in plain text, for example x^2, sqrt(x), 3/4, pi, 2x + 5 = 11.',
-  '- The explanation is short, correct and shows the key steps, so a student learns from a mistake.',
+  '- The explanation is short (under 40 words), correct and shows the key steps, so a student learns from a mistake.',
   '- "type" is one of: calculation, theory, application.',
   'Reply with ONE JSON object and nothing else, in exactly this shape:',
   '{"questions":[{"text":"...","options":["...","...","...","..."],"answer":"B","explanation":"...","type":"calculation"}]}',
@@ -148,12 +154,13 @@ async function generate({ cfg, size, startIndex, avoid, counts: given }) {
     'This is batch starting at question ' + (startIndex + 1) + ', so cover different ideas from earlier batches.'
   ];
   if (avoid && avoid.length) lines.push('Questions already written (do not repeat these or their ideas):\n' + avoid.slice(-60).map((s, i) => (i + 1) + '. ' + String(s).slice(0, 110)).join('\n'));
-  const text = await callModel({ system: WRITER, user: lines.join('\n'), maxTokens: 6000 });
+  const deadline = Date.now() + DEADLINE_MS;
+  const text = await callModel({ system: WRITER, user: lines.join('\n'), maxTokens: 5000, deadline });
   const raw = extractJson(text).questions;
   if (!Array.isArray(raw)) throw new MiloError('Milo\'s reply could not be read. Try again.');
   const good = raw.map(normalize).filter(Boolean).slice(0, size).map(mixOptions);
   if (!good.length) throw new MiloError('Milo did not return usable questions. Try again.');
-  return checkAll(good);
+  return checkAll(good, deadline);
 }
 
 const CHECKER = [
@@ -164,11 +171,13 @@ const CHECKER = [
 ].join('\n');
 
 /* Second opinion: Milo solves each question without the key. If the answers differ, the question is flagged for the admin. */
-async function checkAll(questions) {
+async function checkAll(questions, deadline) {
   if (!questions.length) return questions;
+  deadline = deadline || Date.now() + DEADLINE_MS;
+  if (deadline - Date.now() < 9000) return questions;           // not enough time left for a second opinion: the page shows them as "Not checked"
   try {
     const body = questions.map((q, i) => (i + 1) + '. ' + q.text + '\n' + q.options.map((o) => '   ' + o.key + ') ' + o.text).join('\n')).join('\n\n');
-    const text = await callModel({ system: CHECKER, user: body, maxTokens: Math.max(400, questions.length * 30) });
+    const text = await callModel({ system: CHECKER, user: body, maxTokens: Math.max(400, questions.length * 30), deadline });
     const got = {}; (extractJson(text).answers || []).forEach((a) => { got[a.n] = String(a.answer || '').trim().toUpperCase(); });
     return questions.map((q, i) => {
       const g = got[i + 1];
@@ -202,7 +211,8 @@ async function refine({ cfg, instruction, history, questions }) {
   const quiz = questions.map((q, i) => (i + 1) + '. ' + JSON.stringify({ text: q.text, options: q.options, answer: q.answer, explanation: q.explanation, type: q.type })).join('\n');
   const chat = (history || []).slice(-8).map((m) => (m.role === 'user' ? 'Tutor: ' : 'Milo: ') + String(m.text || '').slice(0, 400)).join('\n');
   const user = ['Quiz: ' + cfg.title + ' | ' + cfg.programme + ' | ' + cfg.subject + ' | difficulty ' + cfg.difficulty + ' | topics: ' + (cfg.topic || 'general'), '', 'QUESTIONS (data):', quiz, '', chat ? 'EARLIER CHAT (data):\n' + chat + '\n' : '', 'THE TUTOR\'S REQUEST:', String(instruction).slice(0, 1500)].join('\n');
-  const out = extractJson(await callModel({ system: EDITOR, user, maxTokens: 8000 }));
+  const deadline = Date.now() + DEADLINE_MS;
+  const out = extractJson(await callModel({ system: EDITOR, user, maxTokens: 6000, deadline }));
 
   const n = questions.length, ops = []; let bad = 0;
   (Array.isArray(out.ops) ? out.ops : []).slice(0, 150).forEach((o) => {
@@ -217,7 +227,7 @@ async function refine({ cfg, instruction, history, questions }) {
   // give every new or changed question a second opinion (at most 30 per request)
   const changed = []; ops.forEach((o) => { if (o.op === 'replace') changed.push(o.question); if (o.op === 'add') o.questions.forEach((q) => changed.push(q)); });
   if (changed.length) {
-    const checked = await checkAll(changed.slice(0, 30)); let k = 0;
+    const checked = await checkAll(changed.slice(0, 30), deadline); let k = 0;
     ops.forEach((o) => { if (o.op === 'replace') { if (k < checked.length) o.question = checked[k]; k++; } if (o.op === 'add') o.questions = o.questions.map((q) => (k < checked.length ? checked[k++] : (k++, q))); });
   }
   let reply = String(out.reply || '').trim().slice(0, 600) || (ops.length ? 'Done.' : 'I did not change anything.');
