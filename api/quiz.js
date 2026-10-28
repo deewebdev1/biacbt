@@ -13,7 +13,6 @@ module.exports = async (req, res) => {
     if (!quiz || !quiz.open) return send(res, 200, { ok: false, error: 'This quiz could not be found, or it has been closed.' });
     const key = p.bia_id ? null : studentKey(p.name);
     const findAttempt = () => (p.bia_id ? store.findTestAttempt(quiz.id, p.bia_id) : store.findTestAttemptByKey(quiz.id, key));
-    if (quiz.mode === 'test' && p.tier !== 'paid' && String(quiz.programme || '').toUpperCase() !== 'JAMB') return send(res, 200, { ok: false, error: 'This test is for tutorial students. Log in with your BIA ID.' });
 
     // Schedule: a test already in progress may be finished; nobody can start a new one outside the window.
     const blocked = blockedMessage(quiz);
