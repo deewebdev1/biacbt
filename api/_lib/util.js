@@ -72,6 +72,12 @@ function limit(req, key, max, windowMs) {
   h.n++; return h.n <= max;
 }
 
+/* One-attempt key for free-class students, who log in with a name only. Capital letters, accents,
+   punctuation and word order are ignored, so "Musa John" and "john musa" are the same student. */
+function studentKey(name) {
+  return 'n:' + String(name || '').toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z\s]/g, ' ').split(/\s+/).filter(Boolean).sort().join(' ');
+}
+
 const KEYS = ['A', 'B', 'C', 'D'];
 
 /* Shows a question to a student. `order` is the list of ORIGINAL option keys in the order the student sees them. */
@@ -84,4 +90,4 @@ function view(q, order, withAnswer) {
   return out;
 }
 
-module.exports = { send, body, only, sign, verify, auth, shuffle, limit, view, KEYS };
+module.exports = { send, body, only, sign, verify, auth, shuffle, limit, view, KEYS, studentKey };
