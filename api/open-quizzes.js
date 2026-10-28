@@ -8,7 +8,6 @@ module.exports = async (req, res) => {
   const p = auth(req, res); if (!p) return;
   try {
     let quizzes = (await store.listOpenQuizzes()).filter((q) => q.pool > 0);
-    if (p.tier !== 'paid') quizzes = quizzes.filter((q) => q.mode === 'practice' || String(q.programme || '').toUpperCase() === 'JAMB');   // free class: Practice + JAMB tests
 
     const done = {};
     const mine = p.bia_id ? await store.testAttemptsForStudent(p.bia_id) : await store.testAttemptsForKey(studentKey(p.name));
