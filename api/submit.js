@@ -1,11 +1,11 @@
 'use strict';
 const store = require('./_lib/store');
-const { send, body, only, auth, view, KEYS } = require('./_lib/util');
+const { send, body, only, auth, view, KEYS, studentKey } = require('./_lib/util');
 
 const GRACE_MS = 120000;                    // network delay allowed after the timer ends
 const REASONS = ['submitted', 'time_up', 'tab_switch'];
 
-/* Builds the result the results page shows. `orders` maps question id -> original keys in the order the student saw. */
+/* Builds the result the results page shows. `orders` maps question id -> original keys in the order the student saw them. */
 function buildResult(quiz, byId, ids, orders, answers, extra) {
   let score = 0;
   const rows = ids.map((id) => {
@@ -41,8 +41,9 @@ module.exports = async (req, res) => {
     let answers = cleanAnswers(b.answers);
 
     if (quiz.mode === 'test') {
-      if (p.tier !== 'paid' || !p.bia_id) return send(res, 200, { ok: false, error: 'Test mode is for paying tutorial students.' });
-      const a = await store.findTestAttempt(quiz.id, p.bia_id);
+      const key = p.bia_id ? null : studentKey(p.name);
+      const findAttempt = () => (p.bia_id ? store.findTestAttempt(quiz.id, p.bia_id) : store.findTestAttemptByKey(quiz.id, key));
+      const a = await findAttempt();
       if (!a) return send(res, 200, { ok: false, error: 'No test in progress was found.' });
 
       if (a.status === 'submitted') {                                   // double submit: same result again
@@ -55,7 +56,7 @@ module.exports = async (req, res) => {
       const result = buildResult(quiz, byId, a.question_ids, a.option_orders, answers, { seconds_taken: seconds, tab_switches: switches, reason });
       const closed = await store.closeAttempt(a.id, { status: 'submitted', submitted_at: new Date().toISOString(), score: result.score, total: result.total, seconds_taken: seconds, tab_switches: switches, reason, answers });
       if (!closed) {                                                      // someone closed it a moment ago
-        const again = await store.findTestAttempt(quiz.id, p.bia_id);
+        const again = await findAttempt();
         return send(res, 200, { ok: true, result: buildResult(quiz, byId, again.question_ids, again.option_orders, again.answers || {}, { seconds_taken: again.seconds_taken || 0, tab_switches: again.tab_switches || 0, reason: again.reason || 'submitted' }) });
       }
       return send(res, 200, { ok: true, result });
