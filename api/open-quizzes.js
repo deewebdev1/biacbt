@@ -1,6 +1,6 @@
 'use strict';
 const store = require('./_lib/store');
-const { send, only, auth } = require('./_lib/util');
+const { send, only, auth, studentKey } = require('./_lib/util');
 const { stateOf } = require('./_lib/schedule');
 
 module.exports = async (req, res) => {
@@ -8,10 +8,11 @@ module.exports = async (req, res) => {
   const p = auth(req, res); if (!p) return;
   try {
     let quizzes = (await store.listOpenQuizzes()).filter((q) => q.pool > 0);
-    if (p.tier !== 'paid') quizzes = quizzes.filter((q) => q.mode === 'practice');   // free class: Practice only
+    if (p.tier !== 'paid') quizzes = quizzes.filter((q) => q.mode === 'practice' || String(q.programme || '').toUpperCase() === 'JAMB');   // free class: Practice + JAMB tests
 
     const done = {};
-    if (p.tier === 'paid' && p.bia_id) (await store.testAttemptsForStudent(p.bia_id) || []).forEach((a) => { done[a.quiz_id] = a; });
+    const mine = p.bia_id ? await store.testAttemptsForStudent(p.bia_id) : await store.testAttemptsForKey(studentKey(p.name));
+    (mine || []).forEach((a) => { done[a.quiz_id] = a; });
 
     const now = Date.now();
     quizzes = quizzes.filter((q) => stateOf(q, now) !== 'closed' || (done[q.id] && done[q.id].status === 'in_progress'));   // closed quizzes disappear, unless the student is mid-test
