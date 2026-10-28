@@ -27,6 +27,11 @@ exports.findTestAttempt = (quizId, biaId) => run(client().from('attempts').selec
 
 exports.testAttemptsForStudent = (biaId) => run(client().from('attempts').select('quiz_id,status,score,total').eq('bia_id', biaId).eq('mode', 'test'));
 
+/* Free-class students have no BIA ID, so their test attempts are found by the name key instead. */
+exports.findTestAttemptByKey = (quizId, key) => run(client().from('attempts').select('*').eq('quiz_id', quizId).eq('student_key', key).eq('mode', 'test').maybeSingle());
+
+exports.testAttemptsForKey = (key) => run(client().from('attempts').select('quiz_id,status,score,total').eq('student_key', key).eq('mode', 'test'));
+
 exports.createAttempt = async (row) => {
   const { data, error } = await client().from('attempts').insert(row).select().single();
   if (error) throw error;
