@@ -1,6 +1,6 @@
 'use strict';
 const store = require('./_lib/store');
-const { send, body, only, auth, shuffle, view, studentKey } = require('./_lib/util');
+const { send, body, only, auth, shuffle, view, studentKey, deviceMark, DEVICE_MSG } = require('./_lib/util');
 const { getSettings } = require('./_lib/settings');
 const { blockedMessage, stateOf } = require('./_lib/schedule');
 const { pickQuestions } = require('./_lib/select');
@@ -12,6 +12,7 @@ module.exports = async (req, res) => {
     const quiz = await store.getQuizByCode(String(body(req).quiz || '').slice(0, 40));
     if (!quiz || !quiz.open) return send(res, 200, { ok: false, error: 'This quiz could not be found, or it has been closed.' });
     const key = p.bia_id ? null : studentKey(p.name);
+    const dm = p.bia_id ? null : deviceMark(req, res, body(req));          // free class: the device is part of the identity
     const findAttempt = () => (p.bia_id ? store.findTestAttempt(quiz.id, p.bia_id) : store.findTestAttemptByKey(quiz.id, key));
 
     const pool = await store.getQuestions(quiz.id);
@@ -39,6 +40,10 @@ module.exports = async (req, res) => {
       // Test: no questions are sent here. They arrive at /api/start, after the student presses Begin.
       const a = await findAttempt();
       if (a && a.status === 'submitted') return send(res, 200, { ok: false, error: 'You have already taken this test.' });
+      if (!a && dm) {                                                  // a different name already used this device for this test
+        const hits = await store.testAttemptsOnDevice(quiz.id, dm.ids);
+        if ((hits || []).some((x) => x.student_key !== key)) return send(res, 200, { ok: false, error: DEVICE_MSG });
+      }
       return send(res, 200, { ok: true, quiz: meta });
     }
 
