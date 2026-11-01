@@ -32,6 +32,13 @@ exports.findTestAttemptByKey = (quizId, key) => run(client().from('attempts').se
 
 exports.testAttemptsForKey = (key) => run(client().from('attempts').select('quiz_id,status,score,total').eq('student_key', key).eq('mode', 'test'));
 
+/* Test attempts that were started from the same device (the ids are checked to be plain hex/uuid text before use). */
+exports.testAttemptsOnDevice = async (quizId, ids) => {
+  if (!ids || !ids.length) return [];
+  const list = ids.join(',');
+  return (await run(client().from('attempts').select('id,student_key,status').eq('quiz_id', quizId).eq('mode', 'test').or('device_id.in.(' + list + '),device_ls.in.(' + list + ')').limit(10))) || [];
+};
+
 exports.createAttempt = async (row) => {
   const { data, error } = await client().from('attempts').insert(row).select().single();
   if (error) throw error;
