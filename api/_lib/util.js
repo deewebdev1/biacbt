@@ -78,6 +78,26 @@ function studentKey(name) {
   return 'n:' + String(name || '').toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z\s]/g, ' ').split(/\s+/).filter(Boolean).sort().join(' ');
 }
 
+/* Device marker for free-class students (no BIA ID). A random id is kept in a long-lived cookie, and the quiz page
+   echoes a second copy kept in the browser's own storage. Either one is enough to recognise the device, and whichever
+   is missing is re-created from the other. */
+const DEV_RX = /^[a-f0-9-]{16,64}$/i;
+function readCookie(req, name) {
+  const h = (req.headers && req.headers.cookie) || '';
+  const hit = h.split(/;\s*/).map((s) => s.split('=')).filter((p) => p[0] === name)[0];
+  return hit ? decodeURIComponent(hit.slice(1).join('=')) : '';
+}
+function deviceMark(req, res, b) {
+  let cookieId = readCookie(req, 'bia_dev'); if (!DEV_RX.test(cookieId)) cookieId = '';
+  const lsId = b && DEV_RX.test(String(b.device || '')) ? String(b.device) : '';
+  if (!cookieId) {
+    cookieId = lsId || crypto.randomUUID();
+    res.setHeader('Set-Cookie', 'bia_dev=' + cookieId + '; Path=/; Max-Age=63072000; HttpOnly; Secure; SameSite=Lax');
+  }
+  return { cookieId, lsId, ids: Array.from(new Set([cookieId, lsId].filter(Boolean))) };
+}
+const DEVICE_MSG = 'This device has already been used for this test. Each student can take a test once. If you think this is a mistake, please contact your tutor.';
+
 const KEYS = ['A', 'B', 'C', 'D'];
 
 /* Shows a question to a student. `order` is the list of ORIGINAL option keys in the order the student sees them. */
@@ -90,4 +110,4 @@ function view(q, order, withAnswer) {
   return out;
 }
 
-module.exports = { send, body, only, sign, verify, auth, shuffle, limit, view, KEYS, studentKey };
+module.exports = { send, body, only, sign, verify, auth, shuffle, limit, view, KEYS, studentKey, deviceMark, DEVICE_MSG };
