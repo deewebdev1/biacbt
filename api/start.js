@@ -1,6 +1,6 @@
 'use strict';
 const store = require('./_lib/store');
-const { send, body, only, auth, shuffle, view, KEYS, studentKey } = require('./_lib/util');
+const { send, body, only, auth, shuffle, view, KEYS, studentKey, deviceMark, DEVICE_MSG } = require('./_lib/util');
 const { blockedMessage } = require('./_lib/schedule');
 const { pickQuestions } = require('./_lib/select');
 
@@ -15,6 +15,7 @@ module.exports = async (req, res) => {
     const quiz = await store.getQuizByCode(String(body(req).quiz || '').slice(0, 40));
     if (!quiz || quiz.mode !== 'test') return send(res, 200, { ok: false, error: 'This test could not be found.' });
     const key = p.bia_id ? null : studentKey(p.name);
+    const dm = p.bia_id ? null : deviceMark(req, res, body(req));          // free class: the device is part of the identity
     const findAttempt = () => (p.bia_id ? store.findTestAttempt(quiz.id, p.bia_id) : store.findTestAttemptByKey(quiz.id, key));
 
     const pool = await store.getQuestions(quiz.id);
@@ -22,6 +23,11 @@ module.exports = async (req, res) => {
 
     let attempt = await findAttempt();
     if (attempt && attempt.status === 'submitted') return send(res, 200, { ok: false, error: 'You have already taken this test.' });
+
+    if (!attempt && dm) {                                              // a different name already used this device for this test
+      const hits = await store.testAttemptsOnDevice(quiz.id, dm.ids);
+      if ((hits || []).some((a) => a.student_key !== key)) return send(res, 200, { ok: false, error: DEVICE_MSG });
+    }
 
     if (!attempt) {
       const blocked = blockedMessage(quiz);
@@ -32,7 +38,7 @@ module.exports = async (req, res) => {
       const minutes = quiz.duration_minutes || 30;
       try {
         attempt = await store.createAttempt({
-          quiz_id: quiz.id, tier: p.tier, student_name: p.name, bia_id: p.bia_id || null, student_key: key, mode: 'test', status: 'in_progress',
+          quiz_id: quiz.id, tier: p.tier, student_name: p.name, bia_id: p.bia_id || null, student_key: key, device_id: dm ? dm.cookieId : null, device_ls: dm ? (dm.lsId || null) : null, mode: 'test', status: 'in_progress',
           ends_at: new Date(Date.now() + minutes * 60000).toISOString(), question_ids: chosen.map((q) => q.id), option_orders: orders
         });
       } catch (e) {
