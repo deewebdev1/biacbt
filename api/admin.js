@@ -9,6 +9,7 @@ const stats = require('./_lib/stats');
 const { stateOf, parseSchedule } = require('./_lib/schedule');
 const { send, body, sign, auth, limit, KEYS } = require('./_lib/util');
 
+const extra = require('./_lib/admin-extra');
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const clean = (n) => String(n || '').replace(/[\u0000-\u001f<>]/g, '').replace(/\s+/g, ' ').trim();
 /* Nigerian numbers: 0803 123 4567, 803 123 4567 and +234 803 123 4567 all become 2348031234567 (the form WhatsApp links need). */
@@ -52,15 +53,34 @@ async function login(req, res) {
 }
 
 /* ---------- dashboard, lists, statistics ---------- */
+/* Practice quizzes can be retaken. For every number staff see (dashboard, quiz list, quiz stats, results),
+   only each student's FIRST practice attempt counts, so a high score from a later retake does not replace it.
+   Students keep every attempt in their own history, and tests are unaffected (they allow one attempt). */
+const nameKey = (n) => String(n || '').toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z\s]/g, ' ').split(/\s+/).filter(Boolean).sort().join(' ');
+function firstOnly(rows) {
+  const isSub = (a) => !a.status || a.status === 'submitted';
+  const first = new Map();
+  (rows || []).forEach((a) => {
+    if (a.mode !== 'practice' || !isSub(a)) return;
+    const who = a.bia_id ? 'b:' + a.bia_id : 'n:' + nameKey(a.student_name);
+    const k = (a.quiz_id || (a.quizzes && a.quizzes.title) || '') + '|' + who;
+    const t = new Date(a.submitted_at || a.started_at || a.created_at || 0).getTime();
+    const cur = first.get(k);
+    if (!cur || t < cur.t) first.set(k, { a, t });
+  });
+  const keep = new Set(Array.from(first.values()).map((v) => v.a));
+  return (rows || []).filter((a) => a.mode !== 'practice' || !isSub(a) || keep.has(a));
+}
+
 on('GET', /^\/stats$/, async (req, res, m, q) => {
   const range = ['year', '30d', '7d'].indexOf(q.get('range')) > -1 ? q.get('range') : 'year';
   const [quizzes, attempts, students, st] = await Promise.all([data.listQuizzes(), data.allAttempts(), data.listStudents(), settings.getSettings()]);
-  send(res, 200, stats.dashboard({ range, quizzes, attempts, students, passMark: st.pass_mark }));
+  send(res, 200, stats.dashboard({ range, quizzes, attempts: firstOnly(attempts), students, passMark: st.pass_mark }));
 });
 
 on('GET', /^\/quizzes$/, async (req, res) => {
   const [quizzes, attempts] = await Promise.all([data.listQuizzes(), data.allAttempts()]);
-  const per = {}; attempts.filter((a) => a.status === 'submitted').forEach((a) => { (per[a.quiz_id] = per[a.quiz_id] || []).push(stats.pct(a)); });
+  const per = {}; firstOnly(attempts).filter((a) => a.status === 'submitted').forEach((a) => { (per[a.quiz_id] = per[a.quiz_id] || []).push(stats.pct(a)); });
   send(res, 200, { ok: true, quizzes: quizzes.map((z) => ({ id: z.id, code: z.code, title: z.title, subject: z.subject, programme: z.programme, mode: z.mode, questions: Math.min(z.per_student, z.pool), pool: z.pool, attempts: (per[z.id] || []).length, avg: stats.avgOf(per[z.id] || []), open: z.open, opens_at: ms(z.opens_at), closes_at: ms(z.closes_at), state: stateOf(z) })) });
 });
 
@@ -70,11 +90,19 @@ on('POST', /^\/quizzes\/([^/]+)\/status$/, async (req, res, m) => {
   send(res, 200, row ? { ok: true } : { ok: false, error: 'Quiz not found.' });
 });
 
+on('POST', /^\/quizzes\/([^/]+)\/delete$/, async (req, res, m) => {
+  if (!UUID.test(m[1])) return fail(res, 'Quiz not found.');
+  const quiz = await data.getQuiz(m[1]); if (!quiz) return fail(res, 'Quiz not found.');
+  try { await data.deleteQuiz(m[1]); }                       // removes the quiz, its questions and its attempts
+  catch (e) { console.error('delete quiz', e); return fail(res, 'Could not delete this quiz. Run the one-time database update first, then try again.'); }
+  send(res, 200, { ok: true });
+});
+
 on('GET', /^\/quizzes\/([^/]+)\/stats$/, async (req, res, m) => {
   if (!UUID.test(m[1])) return fail(res, 'Quiz not found.');
   const quiz = await data.getQuiz(m[1]); if (!quiz) return fail(res, 'Quiz not found.');
   const [questions, attempts, st] = await Promise.all([data.listQuestions(quiz.id), data.quizAttemptsFull(quiz.id), settings.getSettings()]);
-  send(res, 200, stats.quizStats({ quiz, questions, attempts, passMark: st.pass_mark }));
+  send(res, 200, stats.quizStats({ quiz, questions, attempts: firstOnly(attempts), passMark: st.pass_mark }));
 });
 
 on('POST', /^\/quizzes\/([^/]+)\/schedule$/, async (req, res, m) => {
@@ -98,7 +126,7 @@ on('GET', /^\/quizzes\/([^/]+)\/missed$/, async (req, res, m) => {
 
 on('GET', /^\/results$/, async (req, res) => {
   const rows = await data.submittedAttempts(1000);
-  send(res, 200, { ok: true, results: rows.map((a) => ({ name: a.student_name, bia_id: a.bia_id || '', tier: a.tier, quiz: a.quizzes ? a.quizzes.title : '', mode: a.mode, score: a.score, total: a.total, seconds: a.seconds_taken || 0, tab_switches: a.tab_switches || 0, reason: a.reason || 'submitted', at: new Date(a.submitted_at).getTime() })) });
+  send(res, 200, { ok: true, results: firstOnly(rows).map((a) => ({ name: a.student_name, bia_id: a.bia_id || '', tier: a.tier, quiz: a.quizzes ? a.quizzes.title : '', mode: a.mode, score: a.score, total: a.total, seconds: a.seconds_taken || 0, tab_switches: a.tab_switches || 0, reason: a.reason || 'submitted', at: new Date(a.submitted_at).getTime() })) });
 });
 
 on('GET', /^\/candidate$/, async (req, res, m, q) => {
@@ -149,6 +177,25 @@ on('POST', /^\/students\/(\d{1,6})\/active$/, async (req, res, m) => {
   send(res, 200, row ? { ok: true } : { ok: false, error: 'Student not found.' });
 });
 
+/* ---------- reset a test attempt, delete a candidate ---------- */
+on('GET', /^\/test-attempts$/, async (req, res) => {
+  const rows = await extra.listTestAttempts();
+  send(res, 200, { ok: true, attempts: (rows || []).map((a) => ({ id: a.id, name: a.student_name, bia_id: a.bia_id || '', tier: a.tier, quiz: a.quizzes ? a.quizzes.title : '', status: a.status, score: a.score, total: a.total, started: a.started_at ? new Date(a.started_at).getTime() : 0, device: a.device_id ? String(a.device_id).slice(0, 6) : '' })) });
+});
+on('POST', /^\/attempts\/([^/]+)\/reset$/, async (req, res, m) => {
+  if (!UUID.test(m[1])) return fail(res, 'Attempt not found.');
+  const n = await extra.resetAttempt(m[1]);
+  send(res, 200, n ? { ok: true } : { ok: false, error: 'That attempt was not found, or it is not a test attempt.' });
+});
+on('POST', /^\/students\/(\d{1,6})\/delete$/, async (req, res, m) => {
+  const bia = m[1].padStart(4, '0');
+  const s = await data.getStudent(bia);
+  const count = await extra.attemptCountForStudent(bia);
+  if (count > 0 && body(req).with_results !== true) return fail(res, 'This candidate has results. Confirm to delete them together.');
+  const n = await extra.deleteStudent(bia);
+  send(res, 200, n || s ? { ok: true } : { ok: false, error: 'Candidate not found.' });
+});
+
 /* ---------- settings ---------- */
 on('GET', /^\/settings$/, async (req, res) => { send(res, 200, Object.assign({ ok: true }, await settings.getSettings())); });
 on('POST', /^\/settings$/, async (req, res) => { const b = body(req); send(res, 200, Object.assign({ ok: true }, await settings.saveSettings({ tab_limit: b.tab_limit, pass_mark: b.pass_mark }))); });
@@ -157,12 +204,10 @@ on('POST', /^\/settings$/, async (req, res) => { const b = body(req); send(res, 
 on('POST', /^\/generate$/, async (req, res) => {
   if (!limit(req, 'milo', 40, 60000)) return fail(res, 'Slow down a little. Try again in a minute.');
   const b = body(req), bad = checkCfg(b.cfg); if (bad) return fail(res, bad);
-  const size = Math.max(1, Math.min(6, parseInt(b.size, 10) || 1)), start = Math.max(0, parseInt(b.start_index, 10) || 0);
+  const size = Math.max(1, Math.min(10, parseInt(b.size, 10) || 1)), start = Math.max(0, parseInt(b.start_index, 10) || 0);
   const avoid = (Array.isArray(b.avoid) ? b.avoid : []).slice(-80).map((s) => String(s).slice(0, 120));
   let counts = null; const w = b.want;
-  if (w && typeof w === 'object') { const c = { calculation: parseInt(w.calculation, 10) || 0, theory: parseInt(w.theory, 10) || 0, application: parseInt(w.application, 10) || 0 }; const tot = c.calculation + c.theory + c.application;
-    if (tot === size) counts = c;
-    else if (tot > size) { const ks = ['calculation', 'theory', 'application'], o = {}, rem = []; let used = 0; ks.forEach((k) => { const raw = size * c[k] / tot; o[k] = Math.floor(raw); used += o[k]; rem.push({ k, f: raw - o[k] }); }); rem.sort((x, y) => y.f - x.f); for (let i = 0; used < size; i++, used++) o[rem[i % 3].k]++; counts = o; } }   // the page asked for more than the server allows in one go: shrink the counts to fit
+  if (w && typeof w === 'object') { const c = { calculation: parseInt(w.calculation, 10) || 0, theory: parseInt(w.theory, 10) || 0, application: parseInt(w.application, 10) || 0 }; if (c.calculation >= 0 && c.theory >= 0 && c.application >= 0 && c.calculation + c.theory + c.application === size) counts = c; }
   const questions = await milo.generate({ cfg: b.cfg, size, startIndex: start, avoid, counts });
   send(res, 200, { ok: true, questions });
 });
