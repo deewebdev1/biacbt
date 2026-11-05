@@ -9,7 +9,15 @@ const stats = require('./_lib/stats');
 const { stateOf, parseSchedule } = require('./_lib/schedule');
 const { send, body, sign, auth, limit, KEYS } = require('./_lib/util');
 
-const extra = require('./_lib/admin-extra');
+/* The reset/delete helper is loaded only when one of those buttons is used, so a missing file can never stop the admin page or login. */
+let _extra;
+function getExtra() {
+  if (!_extra) {
+    try { _extra = require('./_lib/admin-extra'); }
+    catch (e) { console.error('admin-extra missing', e); throw new Error('The helper file api/_lib/admin-extra.js is missing. Upload it into the api/_lib folder.'); }
+  }
+  return _extra;
+}
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const clean = (n) => String(n || '').replace(/[\u0000-\u001f<>]/g, '').replace(/\s+/g, ' ').trim();
 /* Nigerian numbers: 0803 123 4567, 803 123 4567 and +234 803 123 4567 all become 2348031234567 (the form WhatsApp links need). */
@@ -179,20 +187,20 @@ on('POST', /^\/students\/(\d{1,6})\/active$/, async (req, res, m) => {
 
 /* ---------- reset a test attempt, delete a candidate ---------- */
 on('GET', /^\/test-attempts$/, async (req, res) => {
-  const rows = await extra.listTestAttempts();
+  const rows = await getExtra().listTestAttempts();
   send(res, 200, { ok: true, attempts: (rows || []).map((a) => ({ id: a.id, name: a.student_name, bia_id: a.bia_id || '', tier: a.tier, quiz: a.quizzes ? a.quizzes.title : '', status: a.status, score: a.score, total: a.total, started: a.started_at ? new Date(a.started_at).getTime() : 0, device: a.device_id ? String(a.device_id).slice(0, 6) : '' })) });
 });
 on('POST', /^\/attempts\/([^/]+)\/reset$/, async (req, res, m) => {
   if (!UUID.test(m[1])) return fail(res, 'Attempt not found.');
-  const n = await extra.resetAttempt(m[1]);
+  const n = await getExtra().resetAttempt(m[1]);
   send(res, 200, n ? { ok: true } : { ok: false, error: 'That attempt was not found, or it is not a test attempt.' });
 });
 on('POST', /^\/students\/(\d{1,6})\/delete$/, async (req, res, m) => {
   const bia = m[1].padStart(4, '0');
   const s = await data.getStudent(bia);
-  const count = await extra.attemptCountForStudent(bia);
+  const count = await getExtra().attemptCountForStudent(bia);
   if (count > 0 && body(req).with_results !== true) return fail(res, 'This candidate has results. Confirm to delete them together.');
-  const n = await extra.deleteStudent(bia);
+  const n = await getExtra().deleteStudent(bia);
   send(res, 200, n || s ? { ok: true } : { ok: false, error: 'Candidate not found.' });
 });
 
