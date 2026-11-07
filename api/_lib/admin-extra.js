@@ -35,3 +35,11 @@ exports.deleteStudent = async (biaId) => {
   const rows = await run(client().from('students').delete().eq('bia_id', biaId).select('bia_id'));
   return rows ? rows.length : 0;
 };
+
+/* Updates an existing candidate's name (and phone, when one is given). The BIA ID never changes. */
+exports.updateStudent = async (biaId, name, phone) => {
+  const patch = { name };
+  if (phone) patch.phone = phone;
+  const rows = await run(client().from('students').update(patch).eq('bia_id', biaId).select('bia_id'));
+  return rows ? rows.length : 0;
+};
